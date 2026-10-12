@@ -13,8 +13,16 @@ the number, so the pill covers it.
 - It reads the exact bounds of Samsung's battery view (`com.android.systemui:id/battery`) so the pill matches
   Samsung's size and position in every state (charging, 100%, unplugged), and the other icons never move.
 - The pill hides in the notification shade, and can be shown or hidden on the always-on display.
-- The pill colour follows the status bar (Auto samples a few pixels along the top edge with the accessibility
-  screenshot API, or pick Dark/Light). It looks like Samsung's own: dark pill on light backgrounds, light on dark.
+- The pill colour follows the status bar icons, like Samsung's own: a dark pill on light backgrounds, a light pill on dark.
+  Auto reads the exact signal SystemUI uses, so it switches within about 50-170 ms of the icons:
+  - On app and home screens: the window manager's `mLastAppearance=LIGHT_STATUS_BARS` flag, read by calling `dump()`
+    on the window service binder (about 9 ms). Needs the `DUMP` permission. The `dumpsys` tool itself is not usable
+    from an app ("Can't find service: window").
+  - On the lock screen: Samsung's `Settings.System` `white_lockscreen_statusbar` (what SystemUI reads as
+    `isWhiteKeyguardStatusBar()`), because the flag above only describes the last app and sampling pixels reads the
+    wallpaper mid-fade after the AOD.
+  - Without `DUMP`: fallback that samples a few status bar pixels with the accessibility screenshot API (slower).
+  - Or pick Dark/Light in the app to turn all of this off.
 - When a charger connects, Samsung plays a wide green animation that shows the number. The app covers it with
   a green gradient capsule with a bolt and no digits.
 - Optionally the app also asks SystemUI to hide the number by adding `battery_percent` to the secure
@@ -28,8 +36,9 @@ Wi-Fi and signal icons to the screen edge.
 1. Build: `./gradlew assembleDebug`. Needs JDK 17 and Android SDK platform 37 plus build-tools 37
    (`sdkmanager "platforms;android-37.0" "build-tools;37.0.0"`). The Gradle wrapper downloads Gradle 9.3.1.
 2. Install: `adb install -r app/build/outputs/apk/debug/app-debug.apk`
-3. Grant the write permission once:
+3. Grant the permissions once:
    `adb shell pm grant dev.scamsung.probe android.permission.WRITE_SECURE_SETTINGS`
+   `adb shell pm grant dev.scamsung.probe android.permission.DUMP` (instant pill colour; optional)
 4. Settings > Apps > Battery Pill Control > menu > Allow restricted settings.
 5. Settings > Accessibility > Installed apps > Battery Pill Control > on.
 6. Open the app and turn on "Remove percentage from battery pill".
@@ -49,7 +58,8 @@ git-ignored. Without them the release build is unsigned.
 
 ## Notes
 
-- The service reads only the position of the system battery icon, which system windows are open, and a few
-  status bar pixels to pick the pill colour. It never reads app content and never stores or sends images.
+- The service reads only the position of the system battery icon, which system windows are open, the system's
+  status bar appearance flag, and (fallback only) a few status bar pixels. It never reads app content and never
+  stores or sends images.
 - "Probe tools" in the app dumps system settings and diffs two snapshots, useful for finding settings
   keys on other One UI builds.

@@ -6,4 +6,4 @@
     android:canRetrieveWindowContent="true"
     android:canTakeScreenshot="true"
     android:description="@string/svc_desc"
-    android:notificationTimeout="100" />
+    android:notificationTimeout="0" />

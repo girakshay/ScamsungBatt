@@ -1,5 +1,7 @@
 package dev.scamsung.probe
 
+import android.animation.ArgbEvaluator
+import android.animation.ValueAnimator
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Paint
@@ -14,8 +16,27 @@ import android.view.View
 class BatteryPillView(c: Context) : View(c) {
     var level = 100
     var charging = false
-    /** true = dark fill on light track (for light backgrounds); false = light fill on dark track. */
+    /** true = dark fill on light track (for light backgrounds); false = light fill on dark track. Cross-fades. */
     var dark = true
+        set(v) {
+            if (field == v) return
+            field = v
+            if (!styleSet) { mix = if (v) 1f else 0f; invalidate(); return }
+            fade?.cancel()
+            fade = ValueAnimator.ofFloat(mix, if (v) 1f else 0f).apply {
+                duration = 70
+                addUpdateListener { mix = it.animatedValue as Float; invalidate() }
+                start()
+            }
+        }
+    private var styleSet = false
+    private var mix = 1f             // 1 = dark-fill style, 0 = light-fill style
+    private var fade: ValueAnimator? = null
+    private val argb = ArgbEvaluator()
+    private fun lerp(light: Int, darkC: Int) = argb.evaluate(mix, light, darkC) as Int
+
+    /** Call once the first style is known so later changes animate instead of snapping. */
+    fun markStyleReady() { styleSet = true }
     /** Always-on display: dim colours (low brightness, burn-in friendly). */
     var aod = false
     private val track = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -32,13 +53,10 @@ class BatteryPillView(c: Context) : View(c) {
             fill.color = if (!charging && level <= 15) 0xFF8E2A24.toInt() else 0xFF9A9AA0.toInt()
             bolt.color = 0xFF1C1C1E.toInt()
         } else {
-            track.color = if (dark) 0xFF9BA3AB.toInt() else 0xFF55595E.toInt()
-            fill.color = when {
-                !charging && level <= 15 -> 0xFFFF3B30.toInt()
-                dark -> 0xFF3A3F44.toInt()
-                else -> 0xFFF2F2F7.toInt()
-            }
-            bolt.color = if (dark || (!charging && level <= 15)) 0xFFFFFFFF.toInt() else 0xFF2C2C2E.toInt()
+            track.color = lerp(0xFF55595E.toInt(), 0xFF9BA3AB.toInt())
+            val low = !charging && level <= 15
+            fill.color = if (low) 0xFFFF3B30.toInt() else lerp(0xFFF2F2F7.toInt(), 0xFF3A3F44.toInt())
+            bolt.color = if (low) 0xFFFFFFFF.toInt() else lerp(0xFF2C2C2E.toInt(), 0xFFFFFFFF.toInt())
         }
 
         rect.set(0f, 0f, w, h)

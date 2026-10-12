@@ -1,4 +1,4 @@
 <resources>
     <string name="app_name">Battery Pill Control</string>
-    <string name="svc_desc">Draws a battery pill without the percentage over the status bar, and hides it while the notification shade is open. It reads only the position of the system battery icon, which system windows are open, and the colour of a few status bar pixels to pick a matching pill colour. It never reads app content and never stores or sends any image.</string>
+    <string name="svc_desc">Draws a battery pill without the percentage over the status bar, and hides it while the notification shade is open. It reads only the position of the system battery icon, which system windows are open, and the system status bar light/dark setting (or, as a fallback, the colour of a few status bar pixels) to pick a matching pill colour. It never reads app content and never stores or sends any image.</string>
 </resources>

@@ -153,6 +153,9 @@ private fun StatusCard(resumes: Int) {
     val perm = remember(resumes) {
         ctx.checkSelfPermission("android.permission.WRITE_SECURE_SETTINGS") == PackageManager.PERMISSION_GRANTED
     }
+    val dump = remember(resumes) {
+        ctx.checkSelfPermission("android.permission.DUMP") == PackageManager.PERMISSION_GRANTED
+    }
     val svc = remember(resumes) {
         Settings.Secure.getString(ctx.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES).orEmpty()
             .contains("${ctx.packageName}/")
@@ -168,6 +171,14 @@ private fun StatusCard(resumes: Int) {
             if (!perm) {
                 Text(
                     "adb shell pm grant ${ctx.packageName} android.permission.WRITE_SECURE_SETTINGS",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                )
+            }
+            StatusLine("Instant pill colour", dump, if (dump) "on (exact)" else "off (slower fallback)")
+            if (!dump) {
+                Text(
+                    "adb shell pm grant ${ctx.packageName} android.permission.DUMP",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSecondaryContainer,
                 )

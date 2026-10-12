@@ -2,10 +2,12 @@ package dev.scamsung.probe
 
 import android.accessibilityservice.AccessibilityService
 import android.content.BroadcastReceiver
+import android.app.KeyguardManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
+import android.content.pm.PackageManager
 import android.graphics.PixelFormat
 import android.accessibilityservice.AccessibilityService.ScreenshotResult
 import android.animation.ValueAnimator
@@ -14,6 +16,9 @@ import android.graphics.Color
 import android.graphics.Rect
 import android.hardware.display.DisplayManager
 import android.os.BatteryManager
+import android.provider.Settings
+import android.os.SystemClock
+import java.util.concurrent.Executors
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
@@ -37,6 +42,8 @@ class PillService : AccessibilityService() {
     /** Auto colour: true when the status bar background is light (so icons and the pill are dark). Null until sampled. */
     private var lightBackground: Boolean? = null
     private var lastSampleAt = 0L
+    private var currentPkg: String? = null
+    private val styleByPkg = HashMap<String, Boolean>()   // package -> status bar background was light
     private var burst: ChargeBurstView? = null
     private var burstShimmer: ValueAnimator? = null
     private var lastX = 0          // pill window right inset, px
@@ -50,7 +57,10 @@ class PillService : AccessibilityService() {
         override fun onReceive(c: Context, i: Intent) = update(i)
     }
     private val screen = object : BroadcastReceiver() {
-        override fun onReceive(c: Context, i: Intent) { refreshDozing() }
+        override fun onReceive(c: Context, i: Intent) {
+            refreshDozing()
+            if (i.action != Intent.ACTION_SCREEN_OFF) { scheduleSample(); pollAppearance(POLL_AFTER_EVENT_MS) }
+        }
     }
     private val displays by lazy { getSystemService(DISPLAY_SERVICE) as DisplayManager }
     private val displayListener = object : DisplayManager.DisplayListener {
@@ -71,10 +81,13 @@ class PillService : AccessibilityService() {
         })
         displays.registerDisplayListener(displayListener, null)
         loadMeasured()
+        loadStyleMemory()
         refreshDozing()
         apply()
         scheduleMeasure()
         scheduleSample()
+        handler.postDelayed(idlePoll, IDLE_POLL_GAP_MS)
+        pollAppearance(POLL_AFTER_EVENT_MS)
     }
 
     override fun onInterrupt() {}
@@ -91,6 +104,7 @@ class PillService : AccessibilityService() {
 
     private fun teardown() {
         handler.removeCallbacksAndMessages(null)
+        dumpExec.shutdownNow()
         runCatching { Prefs.sp(this).unregisterOnSharedPreferenceChangeListener(listener) }
         runCatching { unregisterReceiver(battery) }
         runCatching { unregisterReceiver(screen) }
@@ -115,6 +129,7 @@ class PillService : AccessibilityService() {
         if (now == dozing) return
         dozing = now
         updateVisibility()
+        if (!now) pollAppearance(POLL_AFTER_EVENT_MS)
         scheduleMeasure()
         handler.postDelayed(measureRunnable, 800)
     }
@@ -147,7 +162,11 @@ class PillService : AccessibilityService() {
         event ?: return
         val pkg = event.packageName?.toString()
         refreshDozing()
-        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) { scheduleSample(); handler.postDelayed(sampleRunnable, 1300) }
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            val top = focusedPackage() ?: pkg
+            if (usable(top)) applyRemembered(top!!)
+            scheduleSample()
+        }
         when (event.eventType) {
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
                 val t = event.text.joinToString(" ").lowercase()
@@ -157,6 +176,17 @@ class PillService : AccessibilityService() {
             }
             AccessibilityEvent.TYPE_WINDOWS_CHANGED -> {
                 if (shadeOpen && windows.size > 1) setShade(false)
+                // This fires before the window-state event at the start of an app switch: restyle from the focused app.
+                val t = android.os.SystemClock.uptimeMillis()
+                // A cold-started app announces its window late, but the window change fires at the start of the
+                // transition, so begin sampling then (rate-limited, the screenshot API allows ~3 per second).
+                if (t - lastSwitchSample > SWITCH_SAMPLE_GAP_MS) { lastSwitchSample = t; scheduleSample() }
+                if (t - lastFocusCheck > 40) {
+                    lastFocusCheck = t
+                    focusedPackage()?.let { top ->
+                        if (usable(top) && top != currentPkg) { applyRemembered(top); scheduleSample() }
+                    }
+                }
                 scheduleMeasure()
             }
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> if (pkg == SYSTEMUI) scheduleMeasure()
@@ -264,6 +294,7 @@ class PillService : AccessibilityService() {
             wm.addView(it, lp)
         }
         v.dark = darkFill(sp)
+        if (lightBackground != null || sp.getInt(Prefs.PILL_STYLE, 0) != 0) v.markStyleReady()
         v.level = level
         v.charging = charging
         updateVisibility()
@@ -295,19 +326,169 @@ class PillService : AccessibilityService() {
         resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK ==
             android.content.res.Configuration.UI_MODE_NIGHT_YES
 
-    private val sampleRunnable = Runnable { sampleBackground() }
+    // ---- exact status bar appearance from the window manager (needs the DUMP permission) ----
+    // This is the same flag SystemUI uses to tint the status icons, so it flips with them, even for an app seen
+    // for the first time. Reading it takes ~25 ms; the screenshot sampling below is only the fallback.
+    private val dumpExec = Executors.newSingleThreadExecutor()
+    private var polling = false
+    private var pollUntil = 0L
+    private var dumpFailed = false
+    private val dumpMode get() =
+        !dumpFailed && checkSelfPermission("android.permission.DUMP") == PackageManager.PERMISSION_GRANTED
 
+    /** true = light status bar (dark icons), false = dark status bar (white icons), null = could not read. */
+    private fun readLightBars(): Boolean? {
+        val r = runCatching {
+            // Same output as `dumpsys window displays`, but straight from the window service's binder: apps cannot run
+            // the dumpsys tool for it ("Can't find service"), yet DUMP lets them call dump() on the binder.
+            val binder = windowBinder ?: (Class.forName("android.os.ServiceManager")
+                .getMethod("getService", String::class.java).invoke(null, "window") as android.os.IBinder?)
+                ?.also { windowBinder = it } ?: error("no window binder")
+            val pipe = android.os.ParcelFileDescriptor.createPipe()
+            val rd = pipe[0]; val wr = pipe[1]
+            var text = ""
+            val reader = Thread { text = java.io.FileInputStream(rd.fileDescriptor).bufferedReader().readText() }
+            reader.start()
+            try { binder.dump(wr.fileDescriptor, arrayOf("displays")) } finally { wr.close() }
+            reader.join(500)
+            rd.close()
+            if (text.length < 2000) null
+            else text.lineSequence().firstOrNull { it.contains("mLastAppearance=") }?.contains("LIGHT_STATUS_BARS") == true
+        }
+        return r.getOrNull()
+    }
+
+    private var windowBinder: android.os.IBinder? = null
+
+    private fun pollAppearance(forMs: Long) {
+        if (!dumpMode) return
+        pollUntil = maxOf(pollUntil, SystemClock.uptimeMillis() + forMs)
+        if (polling) return
+        polling = true
+        dumpExec.execute {
+            try {
+                while (SystemClock.uptimeMillis() < pollUntil) {
+                    val light = readLightBars()
+                    if (light == null) { dumpFailed = true; break }
+                    handler.post { applyAppearance(light) }
+                    Thread.sleep(8)
+                }
+            } finally { polling = false }
+        }
+    }
+
+    // The lock screen is drawn by SystemUI, which picks its own icon colour from the wallpaper. The window manager's
+    // appearance flag only describes the last app, so on the keyguard fall back to sampling the bar.
+    private fun onKeyguard() = (getSystemService(KEYGUARD_SERVICE) as KeyguardManager).isKeyguardLocked
+
+    /**
+     * The lock screen's own icon colour: Samsung's wallpaper service writes `white_lockscreen_statusbar` (SystemUI reads
+     * it as isWhiteKeyguardStatusBar) from the lock wallpaper's brightness. 1 = light wallpaper, so dark icons.
+     * Unlike sampling pixels it does not depend on the wallpaper having finished fading in after the AOD.
+     */
+    private fun lockscreenLight(): Boolean? =
+        when (Settings.System.getInt(contentResolver, "white_lockscreen_statusbar", -1)) { 1 -> true; 0 -> false; else -> null }
+
+    private fun applyLight(light: Boolean) {
+        if (light != lightBackground) { lightBackground = light; restyle() }
+    }
+
+    private fun applyAppearance(light: Boolean) {
+        if (onKeyguard()) return
+        if (Prefs.sp(this).getInt(Prefs.PILL_STYLE, 0) != 0 || dozing) return
+        if (light != lightBackground) { lightBackground = light; restyle() }
+    }
+
+    // Also catches colour changes inside one app (a page or screen that changes the bar) that fire no window event.
+    private val idlePoll = object : Runnable {
+        override fun run() {
+            if (!dozing && (dumpMode || onKeyguard())) {
+                if (onKeyguard()) {
+                    val l = lockscreenLight()
+                    if (l != null) applyLight(l)
+                    else {
+                        val t = SystemClock.uptimeMillis()
+                        if (t - lastKeyguardSample > 2500) { lastKeyguardSample = t; scheduleSample() }
+                    }
+                } else pollAppearance(IDLE_POLL_MS)
+            }
+            handler.postDelayed(this, IDLE_POLL_GAP_MS)
+        }
+    }
+
+    private var lastKeyguardSample = 0L
+    private var sampleGen = 0
+    private var burstStart = 0L
+    private var burstPkg: String? = null
+    private var lastFocusCheck = 0L
+    private var lastSwitchSample = 0L
+
+    // Sample right away, then again as the app transition settles. Only the late samples are trusted enough to
+    // be remembered: an early one can still be looking at the screen we just left.
     private fun scheduleSample() {
         if (Prefs.sp(this).getInt(Prefs.PILL_STYLE, 0) != 0) return
-        handler.removeCallbacks(sampleRunnable)
-        handler.postDelayed(sampleRunnable, 450)
+        if (onKeyguard()) { lockscreenLight()?.let { applyLight(it); return } }
+        if (dumpMode && !onKeyguard()) { pollAppearance(POLL_AFTER_EVENT_MS); return }
+        val now = android.os.SystemClock.uptimeMillis()
+        // Let a running burst finish: a cold-starting app fires a stream of window events, and restarting the timer
+        // on each one would starve the samples. A different foreground app starts a fresh burst.
+        if (now - burstStart < SAMPLE_BURST_MS && burstPkg == currentPkg) return
+        handler.removeCallbacksAndMessages(SAMPLE_TAG)
+        burstStart = now; burstPkg = currentPkg
+        val gen = ++sampleGen
+        for (d in SAMPLE_DELAYS_MS) handler.postDelayed({ sampleBackground(gen, d >= SAMPLE_TRUSTED_AFTER_MS) }, SAMPLE_TAG, d)
+    }
+
+    // An app seen before keeps its status bar colour, so switch the pill instantly and let sampling confirm it.
+    private fun applyRemembered(pkg: String) {
+        currentPkg = pkg
+        if (dumpMode && !onKeyguard()) return
+        val remembered = styleByPkg[pkg] ?: guessFromHistory() ?: return
+        if (remembered == lightBackground) return
+        lightBackground = remembered
+        restyle()
+    }
+
+    private fun usable(pkg: String?) =
+        pkg != null && pkg != SYSTEMUI && pkg != packageName && !pkg.contains("inputmethod") && !pkg.contains("biometrics")
+
+    /** The app that really owns the focused window now. Event package names are unreliable: an app also fires events on its way out. */
+    private fun focusedPackage(): String? =
+        runCatching { windows.firstOrNull { it.isFocused }?.root?.packageName?.toString() }.getOrNull()
+
+    // For an app not seen before: if the apps you use mostly share one status bar colour, assume the same
+    // (the sample then confirms it). With no clear lean, don't guess: a wrong flash is worse than a short wait.
+    private fun guessFromHistory(): Boolean? {
+        val seen = styleByPkg.filterKeys { !it.contains("launcher") }.values
+        if (seen.size < 3) return null
+        val lightShare = seen.count { it }.toDouble() / seen.size
+        return when {
+            lightShare >= 0.7 -> true
+            lightShare <= 0.3 -> false
+            else -> null
+        }
+    }
+
+    private fun rememberStyle(pkg: String, light: Boolean) {
+        if (styleByPkg[pkg] == light) return
+        styleByPkg[pkg] = light
+        getSharedPreferences(STYLE_MEMORY_PREFS, MODE_PRIVATE).edit().putBoolean(pkg, light).apply()
+    }
+
+    private fun loadStyleMemory() {
+        getSharedPreferences(STYLE_MEMORY_PREFS, MODE_PRIVATE).all.forEach { (k, v) -> if (v is Boolean) styleByPkg[k] = v }
+    }
+
+    private fun restyle() {
+        pill?.let { it.dark = darkFill(Prefs.sp(this)); it.markStyleReady() }
     }
 
     // Looks at a few pixels in the empty middle of the status bar (left of the camera cut-out, right of the clock).
     // The screenshot is cropped, read, and dropped immediately.
-    private fun sampleBackground() {
+    private fun sampleBackground(gen: Int, trusted: Boolean) {
+        val owner = currentPkg
         val now = android.os.SystemClock.uptimeMillis()
-        if (now - lastSampleAt < SAMPLE_MIN_INTERVAL_MS || dozing || shadeOpen) return
+        if (gen != sampleGen || now - lastSampleAt < SAMPLE_MIN_INTERVAL_MS || dozing || shadeOpen) return
         lastSampleAt = now
         takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : TakeScreenshotCallback {
             override fun onSuccess(result: ScreenshotResult) {
@@ -327,9 +508,9 @@ class PillService : AccessibilityService() {
                     }
                 }.getOrNull()
                 runCatching { result.hardwareBuffer.close() }
-                if (light != null && light != lightBackground) {
-                    lightBackground = light
-                    apply()
+                if (light != null && gen == sampleGen) {
+                    if (trusted && !onKeyguard() && owner != null && owner == currentPkg && focusedPackage() == owner) rememberStyle(owner, light)
+                    if (light != lightBackground) { lightBackground = light; restyle() }
                 }
             }
             override fun onFailure(errorCode: Int) {}
@@ -385,7 +566,17 @@ class PillService : AccessibilityService() {
 
     private companion object {
         const val SHADE_CHECK_MS = 400L
-        const val SAMPLE_MIN_INTERVAL_MS = 700L
+        const val POLL_AFTER_EVENT_MS = 900L
+        const val IDLE_POLL_MS = 60L
+        const val IDLE_POLL_GAP_MS = 500L
+        const val SAMPLE_MIN_INTERVAL_MS = 330L
+        // Every ~340 ms (the screenshot API limit) for ~2.5 s: a cold-starting app changes the bar tint a second or more in.
+        val SAMPLE_DELAYS_MS = longArrayOf(170, 510, 850, 1190, 1530, 1870, 2210, 2550)
+        val SAMPLE_TAG = Any()
+        const val SAMPLE_TRUSTED_AFTER_MS = 700L
+        const val SWITCH_SAMPLE_GAP_MS = 900L
+        const val SAMPLE_BURST_MS = 2700L
+        const val STYLE_MEMORY_PREFS = "style_memory6"
         val BURST_TAG = Any()
         // Samsung's animation, measured on a Galaxy S25: about 288x83 px, right-aligned with the normal pill, ~4 s.
         const val BURST_W_PX = 296

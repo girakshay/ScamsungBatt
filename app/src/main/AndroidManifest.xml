@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" />
+    <!-- Lets the pill read the system status bar appearance (light/dark icons) directly. Grant with adb. -->
+    <uses-permission android:name="android.permission.DUMP" />
     <application
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
