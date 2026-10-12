@@ -141,6 +141,32 @@ class PillService : AccessibilityService() {
         if (open) handler.postDelayed(shadeCheck, SHADE_CHECK_MS) else scheduleMeasure()
     }
 
+    // SystemUI also announces "Notification shade." for the PIN screen on the lock screen. In the real shade the status
+    // row (and Samsung's battery view) slides down, from about y=23 to y=128; on the PIN screen it stays where it is.
+    private val shadeConfirm = object : Runnable {
+        var until = 0L
+        override fun run() {
+            val top = batteryTop()
+            when {
+                top != null && top > SHADE_NODE_TOP -> setShade(true)
+                SystemClock.uptimeMillis() < until -> handler.postDelayed(this, 50)
+                top == null -> setShade(true)   // cannot tell: keep the old behaviour and assume the shade
+            }
+        }
+    }
+
+    private fun confirmShade() {
+        if (shadeOpen) return
+        shadeConfirm.until = SystemClock.uptimeMillis() + SHADE_CONFIRM_MS
+        handler.removeCallbacks(shadeConfirm)
+        handler.post(shadeConfirm)
+    }
+
+    private fun batteryTop(): Int? = runCatching {
+        for (w in windows) findBattery(w.root, 0)?.let { return@runCatching it.top }
+        null
+    }.getOrNull()
+
     // The shade can be flagged open by an event (the unlock also fires one) without a matching close event.
     // With the shade really open the window list is a single full-screen window, so clear the flag otherwise.
     private val shadeCheck = object : Runnable {
@@ -170,7 +196,7 @@ class PillService : AccessibilityService() {
         when (event.eventType) {
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
                 val t = event.text.joinToString(" ").lowercase()
-                if (pkg == SYSTEMUI && ("shade" in t || "quick settings" in t || "quick panel" in t)) setShade(true)
+                if (pkg == SYSTEMUI && ("shade" in t || "quick settings" in t || "quick panel" in t)) confirmShade()
                 else if (pkg != null && pkg != SYSTEMUI) setShade(false)
                 scheduleMeasure()
             }
@@ -566,6 +592,8 @@ class PillService : AccessibilityService() {
 
     private companion object {
         const val SHADE_CHECK_MS = 400L
+        const val SHADE_CONFIRM_MS = 700L
+        const val SHADE_NODE_TOP = 80
         const val POLL_AFTER_EVENT_MS = 900L
         const val IDLE_POLL_MS = 60L
         const val IDLE_POLL_GAP_MS = 500L
