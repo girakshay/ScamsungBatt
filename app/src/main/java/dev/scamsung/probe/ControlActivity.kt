@@ -40,7 +40,7 @@ class ControlActivity : Activity() {
             })
         }
 
-        root.addView(TextView(this).apply { text = "Battery Pill Control"; textSize = 24f; setTypeface(typeface, android.graphics.Typeface.BOLD) })
+        root.addView(TextView(this).apply { text = "Battery Pill Control"; textSize = 24f; setTypeface(typeface, android.graphics.Typeface.BOLD); setTextColor(attrColor(android.R.attr.textColorPrimary)); setPadding(0, 0, 0, 16) })
         sw("Remove percentage from battery pill", Prefs.ENABLED, false) { refresh() }
         sw("Ask Samsung to hide its number too (icons stay in place)", Prefs.HIDE_STOCK, false)
         sw("Dark fill (use on light backgrounds)", Prefs.DARK_ICONS, false)
@@ -64,8 +64,10 @@ class ControlActivity : Activity() {
             StockBattery.setHidden(this@ControlActivity, false); recreate()
         } })
         root.addView(Button(this).apply { text = "Probe tools"; setOnClickListener { startActivity(Intent(this@ControlActivity, MainActivity::class.java)) } })
-        info = TextView(this).apply { textSize = 12f; setPadding(0, 24, 0, 0) }
+        info = TextView(this).apply { textSize = 12f; setPadding(0, 24, 0, 0); setTextColor(attrColor(android.R.attr.textColorSecondary)) }
         root.addView(info)
+        for (i in 0 until root.childCount) (root.getChildAt(i) as? Button)?.layoutParams =
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = 14 }
         setContentView(ScrollView(this).apply { addView(root, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT) }.also { sv ->
             sv.setOnApplyWindowInsetsListener { v, i ->
                 val b = i.getInsets(android.view.WindowInsets.Type.systemBars() or android.view.WindowInsets.Type.displayCutout())
@@ -73,6 +75,11 @@ class ControlActivity : Activity() {
                 i
             }
         })
+    }
+
+    private fun attrColor(attr: Int): Int {
+        val a = obtainStyledAttributes(intArrayOf(attr))
+        return a.getColor(0, 0).also { a.recycle() }
     }
 
     override fun onResume() { super.onResume(); refresh() }

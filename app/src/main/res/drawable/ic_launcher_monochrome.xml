@@ -1,0 +1,11 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#FF000000" android:fillAlpha="0.4"
+        android:pathData="M39,41 H69 A13,13 0 0 1 69,67 H39 A13,13 0 0 1 39,41 Z" />
+    <!-- fill with the bolt cut out (even-odd) -->
+    <group>
+        <clip-path android:pathData="M39,41 H69 A13,13 0 0 1 69,67 H39 A13,13 0 0 1 39,41 Z" />
+        <path android:fillColor="#FF000000" android:fillType="evenOdd"
+            android:pathData="M26,41 H70 V67 H26 Z M56.5,44.5 L49,55.5 H54 L51.5,63.5 L60,52 H55 Z" />
+    </group>
+</vector>
