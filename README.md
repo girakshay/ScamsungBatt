@@ -21,13 +21,21 @@ Wi-Fi and signal icons to the screen edge.
 
 ## Setup
 
-1. Build: `./gradlew assembleDebug` (JDK 17, Android SDK 35).
+1. Build: `./gradlew assembleDebug`. Needs JDK 17 and Android SDK platform 37 plus build-tools 37
+   (`sdkmanager "platforms;android-37.0" "build-tools;37.0.0"`). The Gradle wrapper downloads Gradle 9.3.1.
 2. Install: `adb install -r app/build/outputs/apk/debug/app-debug.apk`
 3. Grant the write permission once:
    `adb shell pm grant dev.scamsung.probe android.permission.WRITE_SECURE_SETTINGS`
 4. Settings > Apps > Battery Pill Control > menu > Allow restricted settings.
 5. Settings > Accessibility > Installed apps > Battery Pill Control > on.
 6. Open the app and turn on "Remove percentage from battery pill".
+
+## UI
+
+The settings screen is Jetpack Compose with Material 3 Expressive (expressive theme and motion, shape-morphing
+buttons) and Material You dynamic colours. Expressive components only exist in `material3` 1.5.0, which is still
+beta and needs Android Gradle Plugin 9.1+ and compile SDK 37, so the Compose BOM's `material3` 1.4.0 is overridden.
+The probe tools screen still uses plain views.
 
 ## Notes
 
