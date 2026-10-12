@@ -11,6 +11,9 @@ object Prefs {
     const val DARK_ICONS = "dark_icons"
     const val HIDE_SHADE = "hide_shade"
     const val SHOW_AOD = "show_aod"
+    const val COVER_ANIM = "cover_anim"
+    /** 0 = auto (match the status bar background), 1 = dark fill, 2 = light fill. */
+    const val PILL_STYLE = "pill_style"
     const val AUTO_SIZE = "auto_size"
     const val RIGHT_DP = "right_dp_v6"
     const val ADJ_Y_DP = "adj_y_dp_v6"

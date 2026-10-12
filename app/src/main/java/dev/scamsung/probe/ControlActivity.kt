@@ -29,6 +29,9 @@ import androidx.compose.material3.MaterialExpressiveTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MotionScheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -101,12 +104,13 @@ private fun ControlScreen(resumes: Int) {
                 Section("Pill") {
                     PrefSwitch("Remove percentage from battery pill", "Draw a pill without the number", Prefs.ENABLED, false, sp)
                     PrefSwitch("Ask Samsung to hide its number too", "Icons stay in place", Prefs.HIDE_STOCK, false, sp)
-                    PrefSwitch("Dark fill", "Use on light backgrounds", Prefs.DARK_ICONS, false, sp)
+                    PillStylePicker(sp)
                     PrefSwitch("Match Samsung's size and position", "Follows the system battery icon", Prefs.AUTO_SIZE, true, sp)
                 }
                 Section("Where it shows") {
                     PrefSwitch("Hide in notification shade", "Samsung's own battery shows there", Prefs.HIDE_SHADE, true, sp)
                     PrefSwitch("Show on always-on display", "Dim style on the AOD", Prefs.SHOW_AOD, true, sp)
+                    PrefSwitch("Cover charging animation", "Hides the number in Samsung's plug-in animation", Prefs.COVER_ANIM, true, sp)
                 }
                 Section("Fine-tune") {
                     PrefSlider("Move left", Prefs.RIGHT_DP, 0, -10, 20, sp)
@@ -219,6 +223,29 @@ private fun PrefSwitch(
         colors = ListItemDefaults.colors(containerColor = Color.Transparent),
         modifier = Modifier.clickable { toggle(!on) },
     )
+}
+
+@Composable
+private fun PillStylePicker(sp: SharedPreferences) {
+    val options = listOf("Auto", "Dark", "Light")
+    var style by remember { mutableIntStateOf(sp.getInt(Prefs.PILL_STYLE, 0)) }
+    Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("Pill colour", style = MaterialTheme.typography.bodyLarge)
+        Text(
+            "Auto matches the status bar: a dark pill on light backgrounds, a light pill on dark ones.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+            options.forEachIndexed { i, label ->
+                SegmentedButton(
+                    selected = style == i,
+                    onClick = { style = i; sp.edit().putInt(Prefs.PILL_STYLE, i).apply() },
+                    shape = SegmentedButtonDefaults.itemShape(i, options.size),
+                ) { Text(label) }
+            }
+        }
+    }
 }
 
 @Composable
