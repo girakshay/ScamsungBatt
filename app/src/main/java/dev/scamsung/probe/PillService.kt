@@ -25,6 +25,7 @@ import android.os.PowerManager
 import android.view.Display
 import android.view.Gravity
 import android.view.View
+import android.view.WindowInsets
 import android.view.WindowManager
 import android.view.animation.OvershootInterpolator
 import android.view.accessibility.AccessibilityEvent
@@ -179,7 +180,7 @@ class PillService : AccessibilityService() {
 
     private fun updateVisibility() {
         val sp = Prefs.sp(this)
-        val hide = (shadeOpen && sp.getBoolean(Prefs.HIDE_SHADE, true)) || (dozing && !sp.getBoolean(Prefs.SHOW_AOD, true))
+        val hide = (shadeOpen && sp.getBoolean(Prefs.HIDE_SHADE, true)) || (dozing && !sp.getBoolean(Prefs.SHOW_AOD, true)) || barHidden
         pill?.let { it.aod = dozing; it.invalidate(); it.visibility = if (hide) View.INVISIBLE else View.VISIBLE }
     }
 
@@ -215,7 +216,11 @@ class PillService : AccessibilityService() {
                 }
                 scheduleMeasure()
             }
-            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> if (pkg == SYSTEMUI) scheduleMeasure()
+            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> if (pkg == SYSTEMUI) {
+                scheduleMeasure()
+                val t = SystemClock.uptimeMillis()
+                if (t - lastContentPoll > 250) { lastContentPoll = t; pollAppearance(250) }
+            }
         }
     }
 
@@ -379,12 +384,18 @@ class PillService : AccessibilityService() {
             reader.join(500)
             rd.close()
             if (text.length < 2000) null
-            else text.lineSequence().firstOrNull { it.contains("mLastAppearance=") }?.contains("LIGHT_STATUS_BARS") == true
+            else {
+                // Same dump: the status bar's inset source says visible=false while an app is in full screen mode.
+                text.lineSequence().firstOrNull { it.contains("InsetsSource") && it.contains("type=statusBars") }
+                    ?.let { statusBarShown = it.contains("visible=true") }
+                text.lineSequence().firstOrNull { it.contains("mLastAppearance=") }?.contains("LIGHT_STATUS_BARS") == true
+            }
         }
         return r.getOrNull()
     }
 
     private var windowBinder: android.os.IBinder? = null
+    @Volatile private var statusBarShown = true
 
     private fun pollAppearance(forMs: Long) {
         if (!dumpMode) return
@@ -396,7 +407,8 @@ class PillService : AccessibilityService() {
                 while (SystemClock.uptimeMillis() < pollUntil) {
                     val light = readLightBars()
                     if (light == null) { dumpFailed = true; break }
-                    handler.post { applyAppearance(light) }
+                    val shown = statusBarShown
+                    handler.post { applyAppearance(light); applyBarShown(shown) }
                     Thread.sleep(8)
                 }
             } finally { polling = false }
@@ -417,6 +429,13 @@ class PillService : AccessibilityService() {
 
     private fun applyLight(light: Boolean) {
         if (light != lightBackground) { lightBackground = light; restyle() }
+    }
+
+    // In an app's full screen mode the status bar is gone but our overlay would stay: hide the pill with it.
+    private var barHidden = false
+    private fun applyBarShown(shown: Boolean) {
+        val hidden = !shown && !onKeyguard() && !dozing
+        if (hidden != barHidden) { barHidden = hidden; updateVisibility() }
     }
 
     private fun applyAppearance(light: Boolean) {
@@ -447,6 +466,7 @@ class PillService : AccessibilityService() {
     private var burstStart = 0L
     private var burstPkg: String? = null
     private var lastFocusCheck = 0L
+    private var lastContentPoll = 0L
     private var lastSwitchSample = 0L
 
     // Sample right away, then again as the app transition settles. Only the late samples are trusted enough to
@@ -596,7 +616,7 @@ class PillService : AccessibilityService() {
         const val SHADE_NODE_TOP = 80
         const val POLL_AFTER_EVENT_MS = 900L
         const val IDLE_POLL_MS = 60L
-        const val IDLE_POLL_GAP_MS = 500L
+        const val IDLE_POLL_GAP_MS = 300L
         const val SAMPLE_MIN_INTERVAL_MS = 330L
         // Every ~340 ms (the screenshot API limit) for ~2.5 s: a cold-starting app changes the bar tint a second or more in.
         val SAMPLE_DELAYS_MS = longArrayOf(170, 510, 850, 1190, 1530, 1870, 2210, 2550)
