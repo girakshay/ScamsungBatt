@@ -67,7 +67,7 @@ class ControlActivity : ComponentActivity() {
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun ControlTheme(content: @Composable () -> Unit) {
+internal fun ControlTheme(content: @Composable () -> Unit) {
     val ctx = LocalContext.current
     MaterialExpressiveTheme(
         colorScheme = if (isSystemInDarkTheme()) dynamicDarkColorScheme(ctx) else dynamicLightColorScheme(ctx),
@@ -184,7 +184,7 @@ private fun StatusLine(label: String, ok: Boolean, value: String) {
 }
 
 @Composable
-private fun Section(title: String, content: @Composable () -> Unit) {
+internal fun Section(title: String, content: @Composable () -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(
             title,
@@ -236,7 +236,7 @@ private fun PrefSlider(label: String, key: String, default: Int, min: Int, max: 
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun ExpressiveButton(text: String, tonal: Boolean = false, onClick: () -> Unit) {
+internal fun ExpressiveButton(text: String, tonal: Boolean = false, onClick: () -> Unit) {
     val mod = Modifier.fillMaxWidth().height(ButtonDefaults.MediumContainerHeight)
     if (tonal) {
         FilledTonalButton(onClick = onClick, modifier = mod, shapes = ButtonDefaults.shapes()) { Text(text) }

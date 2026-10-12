@@ -35,7 +35,7 @@ Wi-Fi and signal icons to the screen edge.
 The settings screen is Jetpack Compose with Material 3 Expressive (expressive theme and motion, shape-morphing
 buttons) and Material You dynamic colours. Expressive components only exist in `material3` 1.5.0, which is still
 beta and needs Android Gradle Plugin 9.1+ and compile SDK 37, so the Compose BOM's `material3` 1.4.0 is overridden.
-The probe tools screen still uses plain views.
+The probe tools screen is Compose too, with the same theme.
 
 ## Notes
 

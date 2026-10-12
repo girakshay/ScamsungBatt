@@ -1,235 +1,239 @@
 package dev.scamsung.probe
 
-import android.app.Activity
 import android.content.ContentResolver
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.provider.Settings
-import android.view.Gravity
-import android.view.ViewGroup
-import android.widget.*
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import java.io.File
 
 /**
- * Probe: finds which Settings key (if any) drives the battery percentage in the One UI status bar.
- * The toggle applies the best-known hidden settings for "battery pill without percentage".
- * Workflow: Snapshot A -> change a status bar option in Settings -> Snapshot B -> Diff.
- * Also tries known/guessed keys and a free-form writer. Needs WRITE_SECURE_SETTINGS for writes:
+ * Probe tools: find which Settings key (if any) drives something in the One UI status bar.
+ * Workflow: Snapshot A -> change an option in Settings -> Snapshot B -> Diff A vs B.
+ * Writes need WRITE_SECURE_SETTINGS:
  *   adb shell pm grant dev.scamsung.probe android.permission.WRITE_SECURE_SETTINGS
  */
-class MainActivity : Activity() {
-    private lateinit var out: TextView
-    private val cr: ContentResolver get() = contentResolver
-    private val prefs by lazy { getSharedPreferences("battery_pill_probe", MODE_PRIVATE) }
+class MainActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+        setContent { ControlTheme { ProbeScreen() } }
+    }
+}
 
-    private data class SettingCandidate(val ns: String, val key: String, val hideValue: String, val showValue: String = "1")
+private val NAMESPACES = listOf("system", "secure", "global")
 
-    // Guesses only; none confirmed on every One UI 8.5/9 build.
-    private val percentCandidates = listOf(
-        SettingCandidate("system", "status_bar_show_battery_percent", "0"),
-        SettingCandidate("secure", "status_bar_show_battery_percent", "0"),
-        SettingCandidate("system", "show_battery_percent", "0"),
-        SettingCandidate("secure", "show_battery_percent", "0"),
-        SettingCandidate("global", "show_battery_percent", "0"),
-        SettingCandidate("system", "battery_percentage", "0"),
-        SettingCandidate("secure", "battery_percentage", "0"),
-        SettingCandidate("system", "battery_percent", "0"),
-        SettingCandidate("secure", "battery_percent", "0"),
-        SettingCandidate("system", "display_battery_percentage", "0"),
-        SettingCandidate("secure", "display_battery_percentage", "0"),
-    )
+// Keys worth reading: the ones that exist on One UI 9 plus earlier guesses. Not confirmed to do anything.
+private val CANDIDATES = listOf(
+    "system" to "display_battery_percentage",
+    "system" to "show_battery_background",
+    "system" to "status_bar_show_battery_percent",
+    "secure" to "status_bar_show_battery_percent",
+    "system" to "show_battery_percent",
+    "secure" to "show_battery_percent",
+    "global" to "show_battery_percent",
+    "system" to "battery_percentage",
+    "secure" to "battery_percentage",
+    "system" to "battery_percent",
+    "secure" to "battery_percent",
+    "secure" to "quick_panel_percent_text",
+    "secure" to "icon_blacklist",
+)
 
-    private val backgroundCandidates = listOf(
-        SettingCandidate("system", "show_battery_background", "1", "1"),
-        SettingCandidate("secure", "show_battery_background", "1", "1"),
-        SettingCandidate("system", "status_bar_show_battery_background", "1", "1"),
-        SettingCandidate("secure", "status_bar_show_battery_background", "1", "1"),
-        SettingCandidate("system", "battery_background", "1", "1"),
-        SettingCandidate("secure", "battery_background", "1", "1"),
-    )
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun ProbeScreen() {
+    val ctx = LocalContext.current
+    var out by remember { mutableStateOf(statusText(ctx)) }
+    var ns by remember { mutableStateOf(NAMESPACES[0]) }
+    var key by remember { mutableStateOf("") }
+    var value by remember { mutableStateOf("") }
 
-    private val candidates = percentCandidates + backgroundCandidates
+    Scaffold(containerColor = MaterialTheme.colorScheme.surface) { padding ->
+        Column(
+            Modifier.padding(padding).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            Spacer(Modifier.height(8.dp))
+            Text("Probe tools", style = MaterialTheme.typography.displaySmallEmphasized, color = MaterialTheme.colorScheme.onSurface)
+            Text(
+                "Snapshot A, change an option in Settings, Snapshot B, then diff to find the settings key behind it.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
 
-    override fun onCreate(b: Bundle?) {
-        super.onCreate(b)
-        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(32, 48, 32, 32) }
-        fun btn(label: String, f: () -> Unit) = root.addView(Button(this).apply { text = label; setOnClickListener { f() } })
-
-        val ns = Spinner(this).apply { adapter = ArrayAdapter(context, android.R.layout.simple_spinner_dropdown_item, listOf("system", "secure", "global")) }
-        val key = EditText(this).apply { hint = "key" }
-        val value = EditText(this).apply { hint = "value (empty = delete)" }
-
-        btn("Permission status") { status() }
-        val removePercentage = Switch(this).apply {
-            text = "Remove percentage from battery pill"
-            gravity = Gravity.CENTER_VERTICAL
-            isChecked = prefs.getBoolean("remove_percentage_enabled", false)
-            setOnCheckedChangeListener { _, enabled -> setRemovePercentage(enabled) }
-        }
-        root.addView(removePercentage)
-        btn("Restore saved battery settings") { restoreSavedSettings() }
-        btn("Snapshot A (before)") { snap("A") }
-        btn("Snapshot B (after)") { snap("B") }
-        btn("Diff A vs B") { diff() }
-        btn("Search dump for battery/percent") { search() }
-        btn("Probe candidate keys (read)") { probe() }
-        root.addView(ns); root.addView(key); root.addView(value)
-        btn("Put key/value") { put(ns.selectedItem.toString(), key.text.toString().trim(), value.text.toString().trim()) }
-        btn("Share output") {
-            startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, out.text.toString()), "Share"))
-        }
-        out = TextView(this).apply { setTextIsSelectable(true); textSize = 11f; typeface = android.graphics.Typeface.MONOSPACE }
-        root.addView(out)
-        setContentView(ScrollView(this).apply { addView(root, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT) }.also { sv ->
-            sv.setOnApplyWindowInsetsListener { v, i ->
-                val b = i.getInsets(android.view.WindowInsets.Type.systemBars() or android.view.WindowInsets.Type.displayCutout())
-                v.setPadding(b.left, b.top, b.right, b.bottom)
-                i
+            Section("Snapshots") {
+                Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilledTonalButton({ out = snap(ctx, "A") }, Modifier.weight(1f)) { Text("Snapshot A") }
+                        FilledTonalButton({ out = snap(ctx, "B") }, Modifier.weight(1f)) { Text("Snapshot B") }
+                    }
+                    ExpressiveButton("Diff A vs B") { out = diff(ctx) }
+                    ExpressiveButton("Search for battery / percent", tonal = true) { out = search(ctx.contentResolver) }
+                    ExpressiveButton("Read candidate keys", tonal = true) { out = candidates(ctx.contentResolver) }
+                    ExpressiveButton("Permission status", tonal = true) { out = statusText(ctx) }
+                }
             }
-        })
-        status()
-    }
 
-    private fun granted() = checkSelfPermission("android.permission.WRITE_SECURE_SETTINGS") == PackageManager.PERMISSION_GRANTED
-
-    private fun log(s: String) { out.text = s }
-
-    private fun status() = log(
-        "WRITE_SECURE_SETTINGS: ${if (granted()) "GRANTED" else "NOT granted"}\n" +
-            (if (granted()) "" else "Run on PC:\nadb shell pm grant $packageName android.permission.WRITE_SECURE_SETTINGS\n") +
-            "\nToggle: tries to hide percentage keys while keeping One UI 8.5/9 battery background keys enabled.\n" +
-            "If Samsung removed the underlying setting on your build, the toggle may report changes without visual effect.\n" +
-            "\nProbe steps: Snapshot A -> Settings > Notifications > Status bar, flip an option -> Snapshot B -> Diff."
-    )
-
-    private fun table(ns: String): Map<String, String?> {
-        val uri = when (ns) {
-            "system" -> Settings.System.CONTENT_URI
-            "secure" -> Settings.Secure.CONTENT_URI
-            else -> Settings.Global.CONTENT_URI
-        }
-        val m = sortedMapOf<String, String?>()
-        cr.query(uri, arrayOf("name", "value"), null, null, null)?.use {
-            while (it.moveToNext()) m["$ns/${it.getString(0)}"] = it.getString(1)
-        }
-        return m
-    }
-
-    private fun dump(): Map<String, String?> = table("system") + table("secure") + table("global")
-
-    private fun snap(tag: String) {
-        val d = dump()
-        File(filesDir, "snap$tag.txt").writeText(d.entries.joinToString("\n") { "${it.key}=${it.value}" })
-        log("Snapshot $tag saved: ${d.size} entries")
-    }
-
-    private fun load(tag: String): Map<String, String> =
-        File(filesDir, "snap$tag.txt").takeIf { it.exists() }?.readLines()?.associate {
-            it.substringBefore("=") to it.substringAfter("=", "")
-        } ?: emptyMap()
-
-    private fun diff() {
-        val a = load("A"); val c = load("B")
-        if (a.isEmpty() || c.isEmpty()) return log("Take both snapshots first.")
-        val sb = StringBuilder()
-        (a.keys + c.keys).sorted().forEach { k ->
-            if (a[k] != c[k]) sb.append("$k: ${a[k] ?: "<none>"} -> ${c[k] ?: "<none>"}\n")
-        }
-        log(if (sb.isEmpty()) "No differences." else sb.toString())
-    }
-
-    private fun search() {
-        val re = Regex("batt|percent|pill|statusbar|status_bar|icon_blacklist", RegexOption.IGNORE_CASE)
-        log(dump().filter { re.containsMatchIn(it.key) }.entries.joinToString("\n") { "${it.key}=${it.value}" }.ifEmpty { "No matches." })
-    }
-
-    private fun read(ns: String, k: String): String? = when (ns) {
-        "system" -> Settings.System.getString(cr, k)
-        "secure" -> Settings.Secure.getString(cr, k)
-        else -> Settings.Global.getString(cr, k)
-    }
-
-    private fun probe() = log(candidates.joinToString("\n") { c -> "${c.ns}/${c.key} = ${read(c.ns, c.key) ?: "<not set>"}" })
-
-    private fun put(ns: String, k: String, v: String) {
-        if (k.isEmpty()) return log("Enter a key.")
-        if (!granted() && ns != "system") return log("Need WRITE_SECURE_SETTINGS for $ns.")
-        try {
-            val old = read(ns, k)
-            when (ns) {
-                "system" -> Settings.System.putString(cr, k, v.ifEmpty { null })
-                "secure" -> Settings.Secure.putString(cr, k, v.ifEmpty { null })
-                else -> Settings.Global.putString(cr, k, v.ifEmpty { null })
+            Section("Write a setting") {
+                Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                        NAMESPACES.forEachIndexed { i, n ->
+                            SegmentedButton(
+                                selected = ns == n,
+                                onClick = { ns = n },
+                                shape = SegmentedButtonDefaults.itemShape(i, NAMESPACES.size),
+                            ) { Text(n) }
+                        }
+                    }
+                    OutlinedTextField(key, { key = it }, Modifier.fillMaxWidth(), label = { Text("key") }, singleLine = true)
+                    OutlinedTextField(
+                        value, { value = it }, Modifier.fillMaxWidth(),
+                        label = { Text("value (empty = delete)") }, singleLine = true,
+                    )
+                    ExpressiveButton("Put key / value") { out = put(ctx, ns, key.trim(), value.trim()) }
+                }
             }
-            log("$ns/$k: ${old ?: "<none>"} -> ${read(ns, k) ?: "<none>"}\nCheck status bar. Revert by putting the old value back.")
-        } catch (e: Exception) {
-            log("Failed: $e")
-        }
-    }
 
-    private fun canWrite(ns: String) = ns == "system" || granted()
-
-    private fun write(ns: String, k: String, v: String?): Boolean {
-        if (!canWrite(ns)) return false
-        return try {
-            when (ns) {
-                "system" -> Settings.System.putString(cr, k, v)
-                "secure" -> Settings.Secure.putString(cr, k, v)
-                else -> Settings.Global.putString(cr, k, v)
+            Section("Output") {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHighest),
+                        shape = MaterialTheme.shapes.large,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        SelectionContainer {
+                            Text(
+                                out,
+                                Modifier.padding(16.dp),
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                        }
+                    }
+                    ExpressiveButton("Share output", tonal = true) {
+                        ctx.startActivity(
+                            Intent.createChooser(
+                                Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, out),
+                                "Share",
+                            ),
+                        )
+                    }
+                }
             }
-        } catch (_: Exception) {
-            false
+            Spacer(Modifier.height(24.dp))
         }
     }
+}
 
-    private fun setRemovePercentage(enabled: Boolean) {
-        if (enabled) saveOriginals()
-        val changes = mutableListOf<String>()
-        val targets = if (enabled) {
-            percentCandidates.map { it to it.hideValue } + backgroundCandidates.map { it to it.hideValue }
-        } else {
-            percentCandidates.map { it to it.showValue } + backgroundCandidates.map { it to it.showValue }
-        }
-        targets.forEach { (candidate, value) ->
-            val before = read(candidate.ns, candidate.key)
-            val ok = write(candidate.ns, candidate.key, value)
-            val after = read(candidate.ns, candidate.key)
-            if (ok) changes += "${candidate.ns}/${candidate.key}: ${before ?: "<none>"} -> ${after ?: "<none>"}"
-        }
-        prefs.edit().putBoolean("remove_percentage_enabled", enabled).apply()
-        log(
-            (if (enabled) "Applied hide-percentage attempt.\n" else "Applied show-percentage defaults.\n") +
-                changes.joinToString("\n").ifEmpty { "No settings were writable. Grant WRITE_SECURE_SETTINGS and try again." } +
-                "\n\nCheck the status bar now. Use Restore saved battery settings to revert the pre-toggle values."
-        )
+// ---- probe logic ----
+
+private fun granted(ctx: Context) =
+    ctx.checkSelfPermission("android.permission.WRITE_SECURE_SETTINGS") == PackageManager.PERMISSION_GRANTED
+
+private fun statusText(ctx: Context) =
+    "WRITE_SECURE_SETTINGS: ${if (granted(ctx)) "GRANTED" else "NOT granted"}\n" +
+        (if (granted(ctx)) "" else "Run on PC:\nadb shell pm grant ${ctx.packageName} android.permission.WRITE_SECURE_SETTINGS\n")
+
+private fun table(cr: ContentResolver, ns: String): Map<String, String?> {
+    val uri = when (ns) {
+        "system" -> Settings.System.CONTENT_URI
+        "secure" -> Settings.Secure.CONTENT_URI
+        else -> Settings.Global.CONTENT_URI
     }
-
-    private fun saveOriginals() {
-        val e = prefs.edit()
-        candidates.forEach { c ->
-            val prefKey = "original/${c.ns}/${c.key}"
-            if (!prefs.contains(prefKey) && !prefs.contains("$prefKey.exists")) {
-                val value = read(c.ns, c.key)
-                e.putBoolean("$prefKey.exists", value != null)
-                if (value != null) e.putString(prefKey, value)
-            }
-        }
-        e.apply()
+    val m = sortedMapOf<String, String?>()
+    cr.query(uri, arrayOf("name", "value"), null, null, null)?.use {
+        while (it.moveToNext()) m["$ns/${it.getString(0)}"] = it.getString(1)
     }
+    return m
+}
 
-    private fun restoreSavedSettings() {
-        val changes = mutableListOf<String>()
-        candidates.forEach { c ->
-            val prefKey = "original/${c.ns}/${c.key}"
-            if (!prefs.contains("$prefKey.exists")) return@forEach
-            val value = if (prefs.getBoolean("$prefKey.exists", false)) prefs.getString(prefKey, null) else null
-            val before = read(c.ns, c.key)
-            val ok = write(c.ns, c.key, value)
-            val after = read(c.ns, c.key)
-            if (ok) changes += "${c.ns}/${c.key}: ${before ?: "<none>"} -> ${after ?: "<none>"}"
+private fun dump(cr: ContentResolver): Map<String, String?> = NAMESPACES.fold(emptyMap()) { acc, ns -> acc + table(cr, ns) }
+
+private fun snap(ctx: Context, tag: String): String {
+    val d = dump(ctx.contentResolver)
+    File(ctx.filesDir, "snap$tag.txt").writeText(d.entries.joinToString("\n") { "${it.key}=${it.value}" })
+    return "Snapshot $tag saved: ${d.size} entries"
+}
+
+private fun load(ctx: Context, tag: String): Map<String, String> =
+    File(ctx.filesDir, "snap$tag.txt").takeIf { it.exists() }?.readLines()?.associate {
+        it.substringBefore("=") to it.substringAfter("=", "")
+    } ?: emptyMap()
+
+private fun diff(ctx: Context): String {
+    val a = load(ctx, "A"); val b = load(ctx, "B")
+    if (a.isEmpty() || b.isEmpty()) return "Take both snapshots first."
+    val lines = (a.keys + b.keys).sorted().filter { a[it] != b[it] }
+        .joinToString("\n") { "$it: ${a[it] ?: "<none>"} -> ${b[it] ?: "<none>"}" }
+    return lines.ifEmpty { "No differences." }
+}
+
+private fun search(cr: ContentResolver): String {
+    val re = Regex("batt|percent|pill|statusbar|status_bar|icon_blacklist", RegexOption.IGNORE_CASE)
+    return dump(cr).filter { re.containsMatchIn(it.key) }.entries
+        .joinToString("\n") { "${it.key}=${it.value}" }.ifEmpty { "No matches." }
+}
+
+private fun read(cr: ContentResolver, ns: String, k: String): String? = when (ns) {
+    "system" -> Settings.System.getString(cr, k)
+    "secure" -> Settings.Secure.getString(cr, k)
+    else -> Settings.Global.getString(cr, k)
+}
+
+private fun candidates(cr: ContentResolver) =
+    CANDIDATES.joinToString("\n") { (ns, k) -> "$ns/$k = ${read(cr, ns, k) ?: "<not set>"}" }
+
+private fun put(ctx: Context, ns: String, k: String, v: String): String {
+    if (k.isEmpty()) return "Enter a key."
+    if (!granted(ctx) && ns != "system") return "Need WRITE_SECURE_SETTINGS for $ns."
+    val cr = ctx.contentResolver
+    return try {
+        val old = read(cr, ns, k)
+        val nv = v.ifEmpty { null }
+        when (ns) {
+            "system" -> Settings.System.putString(cr, k, nv)
+            "secure" -> Settings.Secure.putString(cr, k, nv)
+            else -> Settings.Global.putString(cr, k, nv)
         }
-        prefs.edit().putBoolean("remove_percentage_enabled", false).apply()
-        log(changes.joinToString("\n").ifEmpty { "No saved settings to restore, or no settings were writable." })
+        "$ns/$k: ${old ?: "<none>"} -> ${read(cr, ns, k) ?: "<none>"}\nRevert by putting the old value back."
+    } catch (e: Exception) {
+        "Failed: $e"
     }
 }
