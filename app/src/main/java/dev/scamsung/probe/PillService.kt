@@ -38,6 +38,7 @@ class PillService : AccessibilityService() {
 
     private var level = 100
     private var charging = false
+    private var powerSave = false
     private var shadeOpen = false
     private var dozing = false
     /** Auto colour: true when the status bar background is light (so icons and the pill are dark). Null until sampled. */
@@ -50,16 +51,37 @@ class PillService : AccessibilityService() {
     private var lastX = 0          // pill window right inset, px
     private var lastCenterY = 0    // pill vertical centre, px
 
-    /** Screen bounds of Samsung's own battery view, read from the status bar. Null until first measured. */
-    private var measured: Rect? = null
+    /**
+     * Screen bounds of Samsung's own battery view, read from the status bar. The lock screen and the AOD each draw the
+     * battery row at slightly different bounds from every other screen, so keep one measurement per screen kind and
+     * switch the moment that changes; one shared value made the pill jump on lock, AOD and unlock until the next re-measure.
+     */
+    private var measuredNormal: Rect? = null
+    private var measuredLock: Rect? = null
+    private var measuredAod: Rect? = null
+    private val measured: Rect? get() = when (screenKind()) { KIND_AOD -> measuredAod; KIND_LOCK -> measuredLock; else -> measuredNormal }
+    private var lastKind = KIND_NORMAL
+
+    private fun screenKind() = when {
+        dozing -> KIND_AOD
+        onKeyguard() -> KIND_LOCK
+        else -> KIND_NORMAL
+    }
 
     private val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ -> apply() }
     private val battery = object : BroadcastReceiver() {
         override fun onReceive(c: Context, i: Intent) = update(i)
     }
+    private val powerSaveReceiver = object : BroadcastReceiver() {
+        override fun onReceive(c: Context, i: Intent) {
+            powerSave = (getSystemService(POWER_SERVICE) as PowerManager).isPowerSaveMode
+            pill?.let { it.powerSave = powerSave; it.invalidate() }
+        }
+    }
     private val screen = object : BroadcastReceiver() {
         override fun onReceive(c: Context, i: Intent) {
             refreshDozing()
+            checkLockState()
             if (i.action != Intent.ACTION_SCREEN_OFF) { scheduleSample(); pollAppearance(POLL_AFTER_EVENT_MS) }
         }
     }
@@ -77,6 +99,8 @@ class PillService : AccessibilityService() {
         // Read the current plug state first so the sticky broadcast below is not mistaken for a new plug-in.
         registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))?.let { readBattery(it) }
         registerReceiver(battery, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        powerSave = (getSystemService(POWER_SERVICE) as PowerManager).isPowerSaveMode
+        registerReceiver(powerSaveReceiver, IntentFilter(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED))
         registerReceiver(screen, IntentFilter().apply {
             addAction(Intent.ACTION_SCREEN_ON); addAction(Intent.ACTION_SCREEN_OFF); addAction(Intent.ACTION_USER_PRESENT)
         })
@@ -109,6 +133,7 @@ class PillService : AccessibilityService() {
         runCatching { Prefs.sp(this).unregisterOnSharedPreferenceChangeListener(listener) }
         runCatching { unregisterReceiver(battery) }
         runCatching { unregisterReceiver(screen) }
+        runCatching { unregisterReceiver(powerSaveReceiver) }
         endBurst(true)
         runCatching { displays.unregisterDisplayListener(displayListener) }
         remove()
@@ -130,6 +155,7 @@ class PillService : AccessibilityService() {
         if (now == dozing) return
         dozing = now
         updateVisibility()
+        checkLockState()
         if (!now) pollAppearance(POLL_AFTER_EVENT_MS)
         scheduleMeasure()
         handler.postDelayed(measureRunnable, 800)
@@ -189,6 +215,7 @@ class PillService : AccessibilityService() {
         event ?: return
         val pkg = event.packageName?.toString()
         refreshDozing()
+        checkLockState()
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             val top = focusedPackage() ?: pkg
             if (usable(top)) applyRemembered(top!!)
@@ -242,10 +269,12 @@ class PillService : AccessibilityService() {
             }
         }
         val r = found ?: return
-        if (r != measured) {
-            measured = r
+        val kind = screenKind()
+        val old = when (kind) { KIND_AOD -> measuredAod; KIND_LOCK -> measuredLock; else -> measuredNormal }
+        if (r != old) {
+            when (kind) { KIND_AOD -> measuredAod = r; KIND_LOCK -> measuredLock = r; else -> measuredNormal = r }
             getSharedPreferences(MEASURED_PREFS, MODE_PRIVATE).edit()
-                .putString("rect", "${r.left},${r.top},${r.right},${r.bottom}").apply()
+                .putString(when (kind) { KIND_AOD -> "rect_aod"; KIND_LOCK -> "rect_lock"; else -> "rect" }, "${r.left},${r.top},${r.right},${r.bottom}").apply()
             apply()
         }
     }
@@ -267,8 +296,20 @@ class PillService : AccessibilityService() {
     }
 
     private fun loadMeasured() {
-        val parts = getSharedPreferences(MEASURED_PREFS, MODE_PRIVATE).getString("rect", null)?.split(",")?.mapNotNull { it.toIntOrNull() }
-        if (parts != null && parts.size == 4) measured = Rect(parts[0], parts[1], parts[2], parts[3])
+        fun read(key: String): Rect? {
+            val parts = getSharedPreferences(MEASURED_PREFS, MODE_PRIVATE).getString(key, null)?.split(",")?.mapNotNull { it.toIntOrNull() }
+            return if (parts != null && parts.size == 4) Rect(parts[0], parts[1], parts[2], parts[3]) else null
+        }
+        measuredNormal = read("rect"); measuredLock = read("rect_lock"); measuredAod = read("rect_aod")
+    }
+
+    /** Switch to the other screen's measurement right away when the lock state flips. */
+    private fun checkLockState() {
+        val kind = screenKind()
+        if (kind == lastKind) return
+        lastKind = kind
+        apply()
+        scheduleMeasure()
     }
 
     private fun readBattery(i: Intent) {
@@ -328,6 +369,7 @@ class PillService : AccessibilityService() {
         if (lightBackground != null || sp.getInt(Prefs.PILL_STYLE, 0) != 0) v.markStyleReady()
         v.level = level
         v.charging = charging
+        v.powerSave = powerSave
         updateVisibility()
         if (v.isAttachedToWindow) wm.updateViewLayout(v, lp)
         v.invalidate()
@@ -447,6 +489,7 @@ class PillService : AccessibilityService() {
     // Also catches colour changes inside one app (a page or screen that changes the bar) that fire no window event.
     private val idlePoll = object : Runnable {
         override fun run() {
+            checkLockState()
             if (!dozing && (dumpMode || onKeyguard())) {
                 if (onKeyguard()) {
                     val l = lockscreenLight()
@@ -611,6 +654,9 @@ class PillService : AccessibilityService() {
     }
 
     private companion object {
+        const val KIND_NORMAL = 0
+        const val KIND_LOCK = 1
+        const val KIND_AOD = 2
         const val SHADE_CHECK_MS = 400L
         const val SHADE_CONFIRM_MS = 700L
         const val SHADE_NODE_TOP = 80
